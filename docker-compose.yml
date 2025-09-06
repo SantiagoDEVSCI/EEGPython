@@ -1,0 +1,11 @@
+﻿version: "3.9"
+services:
+  eeg:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/home/appuser/app
+    environment:
+      - MPLBACKEND=Agg
+    restart: unless-stopped
