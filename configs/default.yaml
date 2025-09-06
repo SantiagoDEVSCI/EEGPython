@@ -1,0 +1,14 @@
+﻿preproc:
+  l_freq: 1.0
+  h_freq: 45.0
+  filter_order: 8
+  resample_sfreq: 250
+  ica:
+    enabled: true
+    auto_apply: false
+
+microstates:
+  k_range: [4, 7]
+  k_final: 4
+  smoothing:
+    min_duration_ms: 30
