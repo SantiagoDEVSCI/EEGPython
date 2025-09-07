@@ -6,26 +6,17 @@ from mne import io
 from dataclasses import dataclass
 from typing import Optional, List, Any, Tuple
 
-# --- Validación BrainVision: .vhdr + .vmrk + binario (DataFile) ---
-def _resolve_datafile_from_vhdr(vhdr_path: str) -> str:
-    """Lee el .vhdr y resuelve la ruta del binario real (campo 'DataFile').
-    Si no existe, asume .eeg con el mismo stem.
-    """
-    parser = configparser.ConfigParser()
-    parser.optionxform = str  # preserva mayúsculas/minúsculas de las claves
-    parser.read(vhdr_path, encoding="utf-8")
-    data_rel = None
-    if parser.has_section("Common Infos"):
-        data_rel = parser.get("Common Infos", "DataFile", fallback=None)
-    if not data_rel:
-        return vhdr_path.replace(".vhdr", ".eeg")
-    return os.path.join(os.path.dirname(vhdr_path), data_rel)
+# --- Validación simple BrainVision (opcional) ---
+from pathlib import Path
 
 def validate_brainvision_triplet(vhdr_path: str):
-    """Verifica que existan .vhdr, .vmrk y el binario indicado por DataFile."""
-    vmrk_path = vhdr_path.replace(".vhdr", ".vmrk")
-    data_path = _resolve_datafile_from_vhdr(vhdr_path)
-    missing = [p for p in [vhdr_path, vmrk_path, data_path] if not os.path.exists(p)]
+    """
+    Validación opcional: verifica existencia de .vhdr y .vmrk con mismo stem.
+    No valida el binario porque MNE lo resuelve desde el .vhdr.
+    """
+    p = Path(vhdr_path)
+    vmrk = p.with_suffix(".vmrk")
+    missing = [str(x) for x in (p, vmrk) if not x.exists()]
     if missing:
         raise FileNotFoundError(f"Faltan archivos BrainVision: {missing}")
 
@@ -51,10 +42,21 @@ class PreprocConfig:
     ica_auto_apply: bool = False
     detect_eog: bool = True
 
-def load_brainvision(vhdr_path: str, preload: bool=True) -> mne.io.Raw:
-    # Validación clave para evitar el FileNotFoundError por .vmrk/binario faltante
-    validate_brainvision_triplet(vhdr_path)
-    return io.read_raw_brainvision(vhdr_path, preload=preload, verbose=False)
+
+
+def load_brainvision(vhdr_path: str, preload: bool = True) -> mne.io.Raw:
+    """
+    Carga BrainVision con MNE, que maneja encabezados, rutas y codificaciones.
+    """
+    # Validación opcional (ver función arriba); puedes comentarla si quieres
+    try:
+        validate_brainvision_triplet(vhdr_path)
+    except Exception:
+        # Si quieres omitir la validación externa, comenta este bloque
+        pass
+
+    raw = mne.io.read_raw_brainvision(vhdr_path, preload=preload, verbose="ERROR")
+    return raw
 
 def set_montage_if_needed(raw: mne.io.Raw, mode: str, name: str, file_path: str | None) -> mne.io.Raw:
     raw = raw.copy()
