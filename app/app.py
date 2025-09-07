@@ -1,6 +1,10 @@
-﻿import streamlit as st
-import yaml
+﻿import os
+import uuid
+import pathlib
 from pathlib import Path
+
+import streamlit as st
+import yaml
 import numpy as np
 import matplotlib.pyplot as plt
 import mne
@@ -14,6 +18,10 @@ from eeg_pipeline.microstates import (
 )
 from eeg_pipeline.reporting import save_metrics_csv, save_report_html
 
+
+# =========================
+# Configuración de página
+# =========================
 st.set_page_config(page_title="EEG Microstates Pipeline", page_icon="🧠", layout="wide")
 st.title("🧠 EEG Preprocessing + Microestados (Docker)")
 st.caption("Sube BrainVision (.vhdr con .eeg/.vmrk), preprocesa en MNE y calcula microestados.")
@@ -24,21 +32,89 @@ with open(cfg_path, "r", encoding="utf-8") as f:
 pcfg = full_cfg["preproc"]
 mcfg = full_cfg["microstates"]
 
-st.sidebar.header("Datos y Preprocesamiento")
-vhdr_file = st.sidebar.file_uploader("Archivo .vhdr (con .eeg/.vmrk al lado)", type=["vhdr"])
 
+# =========================
+# Sidebar: Subida de datos
+# =========================
+st.sidebar.header("Datos y Preprocesamiento")
+
+files = st.sidebar.file_uploader(
+    "Sube BrainVision (.vhdr junto con .vmrk y .eeg)",
+    type=["vhdr", "vmrk", "eeg"],
+    accept_multiple_files=True,
+    help="Selecciona los 3 archivos del mismo registro (mismo nombre base)."
+)
+
+# Carpeta persistente donde se guardarán los archivos subidos
+BASE_UPLOAD_DIR = os.path.join("data", "uploads")
+os.makedirs(BASE_UPLOAD_DIR, exist_ok=True)
+
+vhdr_path = None
+session_dir = None
+
+
+def save_brainvision_group(files):
+    """Guarda .vhdr/.vmrk/.eeg con el mismo stem en data/uploads/<uuid>/ y devuelve (vhdr_path, session_dir)."""
+    if not files:
+        return None, None
+
+    # Agrupar por nombre base (stem)
+    groups = {}
+    for f in files:
+        p = pathlib.Path(f.name)
+        groups.setdefault(p.stem, {})[p.suffix.lower()] = f
+
+    # Crear carpeta de sesión
+    sess_dir = os.path.join(BASE_UPLOAD_DIR, str(uuid.uuid4()))
+    os.makedirs(sess_dir, exist_ok=True)
+
+    # Elegir primer grupo que contenga .vhdr
+    for stem, g in groups.items():
+        if ".vhdr" in g:
+            for suff, fh in g.items():
+                out_path = os.path.join(sess_dir, f"{stem}{suff}")
+                with open(out_path, "wb") as w:
+                    w.write(fh.getbuffer())
+            return os.path.join(sess_dir, f"{stem}.vhdr"), sess_dir
+
+    return None, sess_dir
+
+
+if files:
+    vhdr_path, session_dir = save_brainvision_group(files)
+    if vhdr_path is None:
+        st.sidebar.error("No se encontró un archivo .vhdr entre los seleccionados.")
+    else:
+        vmrk = vhdr_path.replace(".vhdr", ".vmrk")
+        eeg_guess = vhdr_path.replace(".vhdr", ".eeg")
+        missing = [p for p in [vhdr_path, vmrk, eeg_guess] if not os.path.exists(p)]
+        if missing:
+            st.sidebar.warning(f"Faltan archivos: {missing}. Asegúrate de subir .vhdr, .vmrk y .eeg con el mismo nombre.")
+        else:
+            st.sidebar.success(f"Archivos guardados en {session_dir}")
+            st.sidebar.caption(f"Usando: {os.path.basename(vhdr_path)}")
+
+
+# =========================
+# Sidebar: Parámetros
+# =========================
 st.sidebar.subheader("Montaje")
 montage_mode = st.sidebar.selectbox("Modo de montaje", ["builtin", "file", "none"], index=0)
-builtin_options = ["standard_1020","standard_1005","biosemi32","biosemi64","biosemi128","biosemi256",
-                   "GSN-HydroCel-32","GSN-HydroCel-64_1.0","GSN-HydroCel-128","GSN-HydroCel-256",
-                   "easycap-M10","easycap-M14"]
+builtin_options = [
+    "standard_1020", "standard_1005", "biosemi32", "biosemi64", "biosemi128", "biosemi256",
+    "GSN-HydroCel-32", "GSN-HydroCel-64_1.0", "GSN-HydroCel-128", "GSN-HydroCel-256",
+    "easycap-M10", "easycap-M14"
+]
 montage_name = None
 montage_file_path = None
 if montage_mode == "builtin":
     default_idx = builtin_options.index("standard_1020")
     montage_name = st.sidebar.selectbox("Builtin montage", builtin_options, index=default_idx)
 elif montage_mode == "file":
-    up = st.sidebar.file_uploader("Archivo montaje (.elc/.sfp/.bvef/.loc/.locs/.ced/.txt)", type=["elc","sfp","bvef","loc","locs","ced","txt"])
+    up = st.sidebar.file_uploader(
+        "Archivo montaje (.elc/.sfp/.bvef/.loc/.locs/.ced/.txt)",
+        type=["elc", "sfp", "bvef", "loc", "locs", "ced", "txt"]
+    )
     if up is not None:
         import tempfile
         tmp_m_dir = tempfile.mkdtemp()
@@ -49,18 +125,18 @@ elif montage_mode == "file":
 st.sidebar.subheader("Filtro")
 l_freq = st.sidebar.number_input("Pasaaltas (Hz)", value=float(pcfg["l_freq"]), step=0.1)
 h_freq = st.sidebar.number_input("Pasabajas (Hz)", value=float(pcfg["h_freq"]), step=1.0)
-order = st.sidebar.selectbox("Orden Butterworth", [4,6,8,10], index=[4,6,8,10].index(pcfg["filter_order"]))
+order = st.sidebar.selectbox("Orden Butterworth", [4, 6, 8, 10], index=[4, 6, 8, 10].index(pcfg["filter_order"]))
 
 st.sidebar.subheader("Notch")
 use_notch = st.sidebar.checkbox("Aplicar Notch", value=False)
 notch_freq = st.sidebar.selectbox("Frecuencia", [50, 60], index=0)
 
 st.sidebar.subheader("Remuestreo")
-sfreq = st.sidebar.selectbox("Frecuencia destino (Hz)", [125, 200, 250, 500], index=[125,200,250,500].index(pcfg["resample_sfreq"]))
+sfreq = st.sidebar.selectbox("Frecuencia destino (Hz)", [125, 200, 250, 500], index=[125, 200, 250, 500].index(pcfg["resample_sfreq"]))
 
 st.sidebar.subheader("Referencia")
 ref_mode = st.sidebar.selectbox("Modo", ["average", "linked_mastoids", "single"], index=0)
-ref_channels_text = st.sidebar.text_input("Canales referencia (coma-separado)", value="M1,M2" if ref_mode!="average" else "")
+ref_channels_text = st.sidebar.text_input("Canales referencia (coma-separado)", value="M1,M2" if ref_mode != "average" else "")
 
 st.sidebar.subheader("Canales malos")
 bads_text = st.sidebar.text_input("Marcar malos (coma-separado)", value="")
@@ -79,21 +155,30 @@ min_dur = st.sidebar.number_input("Mín. duración (ms)", value=float(mcfg["smoo
 
 auto_save = st.sidebar.checkbox("Guardar automáticamente al finalizar", value=False)
 
-for key in ["raw","ica","eog_suggest","ms","preproc_log","temp_dir"]:
-    if key not in st.session_state: st.session_state[key] = None
 
-colL, colR = st.columns([2,1])
+# =========================
+# Estado de sesión
+# =========================
+for key in ["raw", "ica", "eog_suggest", "ms", "preproc_log", "temp_dir"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
+
+
+# =========================
+# Layout principal
+# =========================
+colL, colR = st.columns([2, 1])
 
 with colL:
-    if vhdr_file and st.button("Cargar y Preprocesar"):
-        import tempfile
-        temp_dir = tempfile.mkdtemp()
-        st.session_state.temp_dir = temp_dir
-        vhdr_path = Path(temp_dir) / vhdr_file.name
-        with open(vhdr_path, "wb") as f:
-            f.write(vhdr_file.getbuffer())
+    # BOTÓN correcto usando vhdr_path del uploader múltiple
+    if st.button("Cargar y Preprocesar", disabled=(vhdr_path is None)):
+        if vhdr_path is None:
+            st.error("Primero sube los 3 archivos BrainVision en el panel izquierdo.")
+            st.stop()
 
-        ref_channels = tuple([x.strip() for x in ref_channels_text.split(",") if x.strip()]) if ref_mode!="average" else ()
+        st.session_state.temp_dir = session_dir  # opcional: guarda dir de sesión
+
+        ref_channels = tuple([x.strip() for x in ref_channels_text.split(",") if x.strip()]) if ref_mode != "average" else ()
         bads = tuple([x.strip() for x in bads_text.split(",") if x.strip()])
 
         try:
@@ -116,7 +201,12 @@ with colL:
         )
 
         with st.spinner("Ejecutando preprocesamiento..."):
-            out = preproc_pipeline(str(vhdr_path), cfg)
+            try:
+                out = preproc_pipeline(str(vhdr_path), cfg)
+            except FileNotFoundError as e:
+                st.error(f"Archivos BrainVision incompletos: {e}")
+                st.stop()
+
             st.session_state.raw = out["raw"]
             st.session_state.ica = out["ica"]
             st.session_state.eog_suggest = out["eog_suggest"]
@@ -126,6 +216,7 @@ with colL:
         if st.session_state.eog_suggest:
             st.info(f"ICA sugiere excluir (EOG): {st.session_state.eog_suggest}")
 
+    # ===== Sección de datos ya cargados =====
     if st.session_state.raw is not None:
         raw = st.session_state.raw
         st.subheader("Datos")
@@ -145,7 +236,7 @@ with colL:
             exclude_text = st.text_input("Componentes a excluir (coma-separado)", value=",".join(map(str, st.session_state.eog_suggest or [])))
             if st.button("Aplicar ICA con exclusión"):
                 try:
-                    exclude = [int(x) for x in exclude_text.split(",") if x.strip()!=""]
+                    exclude = [int(x) for x in exclude_text.split(",") if x.strip() != ""]
                 except Exception:
                     exclude = []
                 with st.spinner("Aplicando ICA..."):
@@ -161,11 +252,12 @@ with colL:
             gfp = compute_gfp(data)
             peaks = pick_gfp_peaks(gfp, raw.info["sfreq"], min_distance_ms=10, prominence=0.0)
             maps = normalize_maps(data[:, peaks])
-            import matplotlib.pyplot as plt
             ks, gevs = evaluate_k_range(maps, data, int(k_min), int(k_max), n_init=20, max_iter=300)
-            fig, ax = plt.subplots(figsize=(5,3))
+            fig, ax = plt.subplots(figsize=(5, 3))
             ax.plot(ks, gevs, "-o")
-            ax.set_xlabel("k"); ax.set_ylabel("GEV"); ax.grid(True, alpha=0.3)
+            ax.set_xlabel("k")
+            ax.set_ylabel("GEV")
+            ax.grid(True, alpha=0.3)
             st.pyplot(fig)
 
         if st.button("Calcular microestados (k final)"):
@@ -188,31 +280,33 @@ with colL:
             k = ms["templates"].shape[1]
             st.write(f"k = {k} clases")
 
-            import matplotlib.pyplot as plt
             fig, ax = plt.subplots(figsize=(10, 3))
             t = np.arange(len(ms["gfp"])) / raw.info["sfreq"]
             ax.plot(t, ms["gfp"], color="black")
             ax.plot(ms["peaks"]/raw.info["sfreq"], ms["gfp"][ms["peaks"]], "r.", ms=4)
-            ax.set_xlabel("Tiempo (s)"); ax.set_ylabel("GFP")
+            ax.set_xlabel("Tiempo (s)")
+            ax.set_ylabel("GFP")
             st.pyplot(fig)
 
-            cov = ms["metrics"]["coverage"]; dur = ms["metrics"]["duration"]; occ = ms["metrics"]["occurrence"]
+            cov = ms["metrics"]["coverage"]
+            dur = ms["metrics"]["duration"]
+            occ = ms["metrics"]["occurrence"]
             st.table({
                 "Clase": list(range(k)),
-                "Coverage": [round(float(x),3) for x in cov],
-                "Duración (s)": [round(float(x),3) for x in dur],
-                "Ocurrencia (Hz)": [round(float(x),3) for x in occ]
+                "Coverage": [round(float(x), 3) for x in cov],
+                "Duración (s)": [round(float(x), 3) for x in dur],
+                "Ocurrencia (Hz)": [round(float(x), 3) for x in occ]
             })
 
             st.markdown("Topografías:")
-            import numpy as np
-            ncols = min(4, k); nrows = int(np.ceil(k/ncols))
-            fig, axes = plt.subplots(nrows, ncols, figsize=(3*ncols, 3*nrows))
+            ncols = min(4, k)
+            nrows = int(np.ceil(k / ncols))
+            fig, axes = plt.subplots(nrows, ncols, figsize=(3 * ncols, 3 * nrows))
             axes = np.atleast_2d(axes)
             for i in range(k):
-                ax = axes[i//ncols, i%ncols]
-                mne.viz.plot_topomap(ms["templates"][:,i], raw.info, axes=ax, show=False)
-                ax.set_title(f"Clase {i}")
+                ax_i = axes[i // ncols, i % ncols]
+                mne.viz.plot_topomap(ms["templates"][:, i], raw.info, axes=ax_i, show=False)
+                ax_i.set_title(f"Clase {i}")
             plt.tight_layout()
             st.pyplot(fig)
 
