@@ -1,0 +1,16 @@
+# Datos locales y cargas de usuario (no versionar)
+data/
+uploads/
+*.eeg
+*.vhdr
+*.vmrk
+
+# Entornos y cachés
+__pycache__/
+*.pyc
+.venv/
+.env
+.cache/
+
+# Streamlit
+.streamlit/secrets.toml
